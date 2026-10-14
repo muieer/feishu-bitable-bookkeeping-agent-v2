@@ -58,7 +58,7 @@ def validate(case: dict, report: TaskReport) -> list[str]:
         errors.append("无消费状态不符合预期")
     if case["id"] == "faults":
         body = str(result_cards(report))
-        if "待核对" not in body or "未入账" not in body or "已记账" not in body:
+        if "待核对" not in body or "不记账消费记录" not in body or "已记账" not in body:
             errors.append("卡片没有同时表达三种真实写入状态")
     return errors
 

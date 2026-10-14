@@ -30,39 +30,48 @@ def expense_line(entry: EntryResult) -> str:
 
 
 def result_cards(report: TaskReport, page_size: int = 4000) -> list[dict]:
-    blocks = []
+    blocks: list[tuple[str | None, str]] = []
     if report.notice:
-        blocks.append(escape(report.notice))
+        blocks.append((None, escape(report.notice)))
     if report.no_consumption and not report.entries and not report.skipped:
-        blocks.append("此次未包含消费记录。")
+        blocks.append((None, "此次未包含消费记录。"))
     grouped = {
         "success": "已记账消费记录",
-        "failed": "以下消费记录未入账",
+        "failed": "不记账消费记录",
         "uncertain": "以下消费记录待核对",
     }
     for status, title in grouped.items():
         entries = [entry for entry in report.entries if entry.outcome.status == status]
         for index, entry in enumerate(entries, start=1):
-            block = f"**{title}**\n\n{index}. {expense_line(entry)}"
+            block = f"{index}. {expense_line(entry)}"
             if status != "success":
                 block += (
-                    f"\n原文：{escape(entry.expense.source_text)}"
-                    f"\n原因：{escape(entry.outcome.reason)}"
+                    f"\n   原文：{escape(entry.expense.source_text)}"
+                    f"\n   原因：{escape(entry.outcome.reason)}"
                 )
-            blocks.append(block)
-    for index, item in enumerate(report.skipped, start=1):
-        blocks.append(
-            f"**以下消费记录未入账**\n\n{index}. {escape(item.source_text)}"
-            f"\n原因：{escape(item.reason)}"
-        )
+            blocks.append((title, block))
+        if status == "failed":
+            for index, item in enumerate(report.skipped, start=len(entries) + 1):
+                blocks.append(
+                    (
+                        title,
+                        f"{index}. {escape(item.source_text)}\n   原因：{escape(item.reason)}",
+                    )
+                )
     if any(entry.outcome.status == "uncertain" for entry in report.entries):
-        blocks.append("待核对消费不会自动再次提交，请检查账本后再决定后续处理。")
+        blocks.append((None, "待核对消费不会自动再次提交，请检查账本后再决定后续处理。"))
     pages, current = [], ""
-    for block in blocks:
-        if current and len(current) + len(block) > page_size:
+    current_title = None
+    for title, block in blocks:
+        heading = f"**{title}：**\n\n" if title and title != current_title else ""
+        separator = ("\n" if title and title == current_title else "\n\n") if current else ""
+        if current and len(current) + len(separator) + len(heading) + len(block) > page_size:
             pages.append(current)
             current = ""
-        current += ("\n\n" if current else "") + block
+            separator = ""
+            heading = f"**{title}：**\n\n" if title else ""
+        current += separator + heading + block
+        current_title = title
     pages.append(current or "此次处理未能完成，请稍后查看处理结果。")
     color = (
         "orange"

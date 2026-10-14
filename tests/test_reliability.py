@@ -1,12 +1,13 @@
 import asyncio
 from datetime import date
 
+import pytest
 from lark_channel.channel.types import SendResult
 from pydantic_ai.messages import ToolReturnPart
 
 from bookkeeping.agent import create_agent
 from bookkeeping.cards import CardReporter, result_cards
-from bookkeeping.domain import TaskReport, WriteOutcome
+from bookkeeping.domain import EntryResult, Expense, SkippedExpense, TaskReport, WriteOutcome
 from bookkeeping.journal import Journal
 from bookkeeping.service import BookkeepingService
 
@@ -236,8 +237,6 @@ def test_mismatched_ledger_cannot_reuse_dedup_database(settings, journal):
 
 
 def test_card_escapes_mentions_and_paginates_without_hiding_results():
-    from bookkeeping.domain import SkippedExpense
-
     report = TaskReport(
         skipped=[
             SkippedExpense(source_text=f"<at id=all>消费{i}" + "长" * 40, reason="分类不明确")
@@ -247,5 +246,53 @@ def test_card_escapes_mentions_and_paginates_without_hiding_results():
     cards = result_cards(report, page_size=200)
     bodies = [item["body"]["elements"][0]["content"] for item in cards]
     assert len(cards) > 1 and "<at" not in "".join(bodies)
+    assert all(len(body) <= 200 for body in bodies)
+    assert all(body.count("**不记账消费记录：**") == 1 for body in bodies)
     for index in range(10):
-        assert f"消费{index}" in "".join(bodies)
+        assert "".join(bodies).count(f"消费{index}") == 1
+        assert f"{index + 1}. &lt;at id=all&gt;消费{index}" in "".join(bodies)
+
+
+@pytest.mark.parametrize("include_uncertain", [False, True])
+def test_card_groups_three_booked_and_two_unbooked_expenses(include_uncertain):
+    statuses = ["success", "success", "success", "failed"]
+    if include_uncertain:
+        statuses.append("uncertain")
+    report = TaskReport(
+        entries=[
+            EntryResult(
+                expense=Expense(
+                    source_text=f"测试消费{index}，金额{index}元",
+                    source_occurrence=1,
+                    description=f"测试消费{index}",
+                    amount=str(index),
+                    expense_date=TODAY,
+                    category_l1="测试类别",
+                    category_l2="测试二级",
+                ),
+                outcome=WriteOutcome(status=status, reason=f"测试原因{index}"),
+            )
+            for index, status in enumerate(statuses, start=1)
+        ],
+        skipped=[SkippedExpense(source_text="测试跳过消费", reason="测试跳过原因")],
+    )
+    cards = result_cards(report)
+    assert len(cards) == 1
+    body = cards[0]["body"]["elements"][0]["content"]
+    assert body.count("**已记账消费记录：**") == 1
+    assert body.count("**不记账消费记录：**") == 1
+    booked, unbooked = body.split("**不记账消费记录：**")
+    for index in range(1, 4):
+        assert f"{index}. {TODAY:%Y/%m/%d}｜测试类别｜测试二级｜测试消费{index}" in booked
+    assert f"1. {TODAY:%Y/%m/%d}｜测试类别｜测试二级｜测试消费4" in unbooked
+    assert "2. 测试跳过消费" in unbooked
+    assert "原文：测试消费4，金额4元" in unbooked
+    assert "原因：测试原因4" in unbooked
+    assert "原因：测试跳过原因" in unbooked
+    assert "测试消费4" not in booked
+    if include_uncertain:
+        assert body.count("**以下消费记录待核对：**") == 1
+        assert "测试原因5" in body
+        assert "待核对消费不会自动再次提交" in body
+    else:
+        assert "待核对" not in body
