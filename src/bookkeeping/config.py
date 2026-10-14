@@ -87,5 +87,5 @@ class Settings(BaseSettings):
 
 def load_settings(project_dir: Path, env_file: Path | None = None) -> Settings:
     project_dir = project_dir.resolve()
-    selected = env_file or project_dir / "env.txt"
+    selected = env_file or project_dir / ".env"
     return Settings(_env_file=selected, _env_file_encoding="utf-8", project_dir=project_dir)

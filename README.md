@@ -16,10 +16,10 @@ cd feishu-bitable-bookkeeping-agent-v2
 
 第一条应用命令只读检查分类知识、真实表字段和长连接，不处理消息。第二条命令保持运行，收到飞书消息后开始记账；按 `Ctrl+C` 停止。
 
-默认读取项目根目录的 `env.txt`，环境变量可覆盖同名配置。已有 `.env` 不会被隐式加载。如需选择其他配置文件，使用：
+默认读取项目根目录的 `.env`，环境变量可覆盖同名配置。如需选择其他配置文件，使用：
 
 ```bash
-.venv/bin/python -m bookkeeping --env-file .env start
+.venv/bin/python -m bookkeeping --env-file /path/to/custom.env start
 ```
 
 机器人默认接收私聊。若需要群聊，在配置中设置 `ALLOW_GROUPS=true`，然后在群里 @机器人。`ALLOWED_USER_IDS` 可配置逗号分隔的用户 `open_id`；留空时，用户范围由飞书应用可见范围决定。
