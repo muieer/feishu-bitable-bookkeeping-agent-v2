@@ -1,0 +1,35 @@
+# 个人知识库与原始资料
+/knowledges/
+/categories.json
+/rules.json
+/schema.json
+/docs/business_specification.md
+/tests/fixtures/real_model_classification.json
+
+# 凭证与个人环境配置；只保留无真实值的模板
+.env
+.env.*
+!.env.example
+env.txt
+
+# 账本状态、消费日志、模型请求和测试产物
+.runtime/
+*.log
+*.jsonl
+*.sqlite
+*.sqlite3
+*.db
+*-wal
+*-shm
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 本地依赖与工具缓存
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
