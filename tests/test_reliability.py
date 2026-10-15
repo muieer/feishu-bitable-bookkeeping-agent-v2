@@ -1,9 +1,10 @@
 import asyncio
+import json
 from datetime import date
 
 import pytest
+from langchain_core.messages import ToolMessage
 from lark_channel.channel.types import SendResult
-from pydantic_ai.messages import ToolReturnPart
 
 from bookkeeping.agent import create_agent
 from bookkeeping.cards import CardReporter, result_cards
@@ -46,10 +47,9 @@ async def test_invalid_peer_does_not_block_valid_row_and_no_false_success(
     assert report.entries[0].outcome.record_id == "recFake001"
     assert report.skipped[0].source_text == "买咖啡0元"
     returns = [
-        part.content
+        json.loads(msg.content)
         for msg in script.seen_messages[-1]
-        for part in msg.parts
-        if isinstance(part, ToolReturnPart)
+        if isinstance(msg, ToolMessage) and msg.name == "add_expenses"
     ]
     assert any(item[0]["status"] == "rejected" for item in returns)
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 from pydantic import ValidationError
 
-from .agent import create_agent, create_model
+from .agent import create_agent
 from .audit import Audit, ModelAuditHooks, RequestBudget
 from .cards import CardReporter
 from .channel import ChannelApplication, create_channel
@@ -18,6 +18,7 @@ from .cli import LarkCliLedger
 from .config import Settings, load_settings
 from .journal import Journal
 from .knowledge import Knowledge
+from .model import create_model
 from .service import BookkeepingService
 
 

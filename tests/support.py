@@ -1,8 +1,11 @@
 from collections import deque
 from datetime import date
+from typing import Any
 
-from pydantic_ai.messages import ModelResponse, ToolCallPart
-from pydantic_ai.models.function import FunctionModel
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from bookkeeping.domain import Expense, ExpenseProposal, WriteOutcome
 
@@ -56,24 +59,48 @@ class MemoryLedger:
         return WriteOutcome(status=state, reason=reason)
 
 
+class ScriptedChatModel(BaseChatModel):
+    script: Any = Field(exclude=True, repr=False)
+
+    @property
+    def _llm_type(self):
+        return "scripted-offline-model"
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self.bind(**kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self.script.respond(messages)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self.script.respond(messages)
+
+
 class ScriptedModel:
     def __init__(self, steps: list[list[tuple[str, dict]]]):
         self.steps = deque(steps)
         self.seen_messages = []
         self.calls = 0
-        self.model = FunctionModel(self.respond)
+        self.model = ScriptedChatModel(script=self)
 
-    def respond(self, messages, info):
+    def respond(self, messages):
         self.calls += 1
-        self.seen_messages.append(messages)
+        self.seen_messages.append([message.model_copy(deep=True) for message in messages])
         calls = self.steps.popleft()
-        return ModelResponse(
-            [
-                ToolCallPart(
-                    info.output_tools[0].name if name == "finish" else name,
-                    arguments,
-                    tool_call_id=f"call_{self.calls}_{index}",
+        return ChatResult(
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "Decision" if name == "finish" else name,
+                                "args": arguments,
+                                "id": f"call_{self.calls}_{index}",
+                            }
+                            for index, (name, arguments) in enumerate(calls)
+                        ],
+                    )
                 )
-                for index, (name, arguments) in enumerate(calls)
             ]
         )

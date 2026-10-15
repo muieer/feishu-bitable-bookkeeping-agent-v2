@@ -14,13 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bookkeeping.__main__ import process_lock  # noqa: E402
-from bookkeeping.agent import create_agent, create_model  # noqa: E402
+from bookkeeping.agent import create_agent  # noqa: E402
 from bookkeeping.audit import Audit, ModelAuditHooks, RequestBudget  # noqa: E402
 from bookkeeping.cards import result_cards  # noqa: E402
 from bookkeeping.config import load_settings  # noqa: E402
 from bookkeeping.domain import TaskReport  # noqa: E402
 from bookkeeping.journal import Journal  # noqa: E402
 from bookkeeping.knowledge import Knowledge  # noqa: E402
+from bookkeeping.model import create_model  # noqa: E402
 from bookkeeping.service import BookkeepingService  # noqa: E402
 from tests.support import TODAY, MemoryLedger  # noqa: E402
 

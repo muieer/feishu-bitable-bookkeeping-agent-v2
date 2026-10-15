@@ -2,13 +2,13 @@
 
 ## 核心结构
 
-应用由一个本地进程、一个 Pydantic AI Agent、两个受控账本工具及一个 SQLite 执行日志组成。模型负责消费理解、分类、历史查询选择、交易数量判断和完成条件；程序负责校验字段、限制操作权限、保存提交状态以及基于真实回执生成卡片。
+应用由一个本地进程、一个 LangChain Agent、两个受控账本工具及一个 SQLite 执行日志组成。模型负责消费理解、分类、历史查询选择、交易数量判断和完成条件；程序负责校验字段、限制操作权限、保存提交状态以及基于真实回执生成卡片。
 
 ```mermaid
 flowchart LR
     U[飞书用户] <--> C[Python Channel SDK\nWebSocket]
     C --> Q[持久消息队列]
-    Q --> A[Pydantic AI Agent\n火山方舟]
+    Q --> A[LangChain Agent / LangGraph\n火山方舟]
     K[个人分类知识] --> A
     A <--> T[查询历史 / 新增消费]
     T --> V[字段校验与提交预留]
@@ -25,13 +25,30 @@ flowchart LR
 
 | 文件 | 职责 |
 |---|---|
-| `src/bookkeeping/agent.py` | Agent、业务指引、知识上下文、两个工具和最终输出校验 |
+| `src/bookkeeping/agent.py` | LangChain Agent、工具注册，以及上下文、请求限制、串行执行和结束校验中间件 |
+| `src/bookkeeping/model.py` | 方舟模型适配、推理字段回传和无隐式重试的 HTTP 客户端 |
+| `src/bookkeeping/prompts.py` | 业务指引和原始消息包装 |
+| `src/bookkeeping/tools.py` | 不依赖 Agent 框架的账本工具、逐笔提交及最终输出业务校验 |
 | `src/bookkeeping/domain.py`、`knowledge.py` | 数据模型、金额与日期依据、完整分类路径和规则引用校验 |
 | `src/bookkeeping/cli.py` | 固定命令、固定目标、字段转换、受控查询和回执解释 |
 | `src/bookkeeping/journal.py` | 消息去重、原文位置预留、写入结果、恢复与待送达结果 |
 | `src/bookkeeping/service.py` | 承载 Agent 运行、限制请求与时长、保存真实结果 |
 | `src/bookkeeping/channel.py`、`cards.py` | SDK 长连接、跨事件循环交接、卡片进度和最终反馈 |
 | `src/bookkeeping/audit.py`、`config.py` | 配置、凭证保护、详细日志及测试请求计数 |
+
+## LangChain 运行边界
+
+使用 `langchain.agents.create_agent` 构建模型与工具循环，通过 `ToolRuntime` 为工具注入本条消息的执行上下文。每条消息单独调用 `ainvoke`，只携带本条消息及其运行过程中产生的工具结果；上下文、请求计数和参数纠正次数不会在消息之间复用。未配置 LangGraph checkpointer，SQLite 仍是消息去重、提交状态和中断恢复的唯一持久依据。
+
+Agent 通过 `ToolStrategy(Decision)` 返回结构化结束结果。`Decision` 只表示结束输出，不增加账本操作权限。中间件沿用基准提交 `f74e403` 的 `exhaustive` 行为：先根据本轮工具执行前的执行日志校验结束输出，保留首个有效结果，再检查并串行执行本轮账本工具。结束输出无效但仍在纠正预算内时，有效账本工具仍会执行，模型在下一轮纠正结束输出；请求预算耗尽时保留已经确认的写入结果。
+
+工具纠正按工具名和模型轮次计数。同一轮中，同名工具的多个错误只占一个纠正轮次；某轮没有再出现该工具的错误时，下一轮清除其旧计数。连续第三轮仍然失败时停止处理。参数格式错误、无法解析的 JSON 和工具主动报告的可纠正错误都进入这一预算；错误反馈不包含原始校验输入。模型没有返回任何工具调用时，仍使用原有的结束输出纠正次数限制。
+
+兼容性边界：模型同轮要求新增某笔消费，又将它列入 `skipped` 或声明 `no_consumption` 时，结束校验看到的是写入前的状态，仍可能保留与本轮实际写入不一致的结束声明。这一既有行为在本次框架迁移中保留，没有将校验移到写入后。成功、失败和待核对的执行记录仍由工具回执生成。
+
+即使模型同轮返回多个账本工具调用，运行上下文中的锁也会保持工具串行执行。新增工具中的原文范围预留、逐笔校验、逐笔提交和取消处理保持原有实现。
+
+方舟适配器沿用 Chat Completions 接口及 `max_tokens` 参数，保留响应中的 `reasoning_content`，并在后续工具轮次中回传。推理内容仍不进入进度或结果卡片。运行时关闭 LangSmith 追踪导出，模型请求、工具结果和异常仍写入原有本地脱敏日志。
 
 ## 分类知识
 
@@ -65,13 +82,13 @@ SDK 在后台事件循环调用处理器。处理器先把消息交给应用主�
 
 工具无法启动，以及飞书明确返回权限、参数等拒绝结果时，反馈未入账。写入已经启动但发生超时、未知异常、无法解析输出或缺少行 ID 时，反馈待核对。每笔消费的执行结果独立保存，后续模型请求失败或任务达到上限不会抹去之前的成功结果。
 
-Agent 的结构化结束输出只有未提交消费及无消费状态，不包含可自行声明的成功列表。最终卡片的成功、失败和待核对记录全部来自 SQLite 中实际工具结果。未提交消费的原文也会核对，并阻止其原因擅自宣称记账成功。
+Agent 的结构化结束输出只有未提交消费及无消费状态，不包含可自行声明的成功列表。最终卡片的成功、失败和待核对记录全部来自 SQLite 中实际工具结果。未提交消费的原文也会核对，并阻止其原因擅自宣称记账成功；同轮写入与结束声明的既有校验边界见「LangChain 运行边界」。
 
 进度卡片不会展示模型推理、工具参数、行 ID 或凭证。较长结果拆成多张卡片，保留所有消费。卡片失败时保留待送达状态，后续只补发结果，不重新记账。
 
 ## 请求限制和日志
 
-单任务使用 Pydantic AI 的请求及工具调用上限，并用总运行超时保护本地进程。实际测试另在 HTTP 请求钩子中持久计数，客户端关闭隐式重试，禁止突破 10 次网络请求。
+单任务在中间件中检查模型请求及普通工具调用上限，默认分别为 12 次和 30 次，并用总运行超时保护本地进程。工具派发前，按已完成调用数加本轮全部普通调用数检查上限，并完成本轮所有参数校验；超过纠正上限时，不会先提交同轮的其他有效消费。格式校验失败、未执行的调用不累加已完成调用数。达到上限时保留已确认的账本结果。实际测试另在 HTTP 请求钩子中持久计数，客户端关闭隐式重试，禁止突破 10 次网络请求。
 
 GLM-5.3-Flash 的官方模型说明列出了推理档位及默认行为，因此应用显式选择 `low`，并提供可配置的输出上限。首次测试出现思考内容耗尽输出额度后进行了这项调整。[官方模型说明](https://huggingface.co/zai-org/GLM-5.3-Flash)、[方舟 Chat API](https://docs.volcengine.com/docs/ark/chat-api?lang=zh)。
 
@@ -79,8 +96,10 @@ GLM-5.3-Flash 的官方模型说明列出了推理档位及默认行为，因此
 
 ## 依赖接口依据
 
-- [Pydantic AI OpenAI 兼容接口](https://pydantic.dev/docs/ai/models/openai/)：使用 `OpenAIChatModel` 和自定义 `OpenAIProvider`。
-- [Pydantic AI Agent](https://pydantic.dev/docs/ai/core-concepts/agent/)：使用 Agent 工具、依赖注入和请求上限。
+- [LangChain Agent](https://docs.langchain.com/oss/python/langchain/agents)：使用 `create_agent` 承载自主模型与工具循环。
+- [LangChain 中间件](https://docs.langchain.com/oss/python/langchain/middleware/custom)：在模型和工具边界注入上下文、实施限制并校验结果。
+- [LangChain 结构化输出](https://docs.langchain.com/oss/python/langchain/structured-output)：使用 `ToolStrategy` 返回和纠正结束输出。
+- [ChatOpenAI 兼容接口](https://docs.langchain.com/oss/python/integrations/chat/openai)：通过自定义适配器补充方舟推理字段。
 - [官方 Python Channel SDK](https://github.com/larksuite/channel-sdk-python)：使用独立包 `lark-channel-sdk` 和 `lark_channel` 导入路径。
 - [Channel SDK 接口参考](https://github.com/larksuite/channel-sdk-python/blob/main/docs/reference.md)：使用 WebSocket 接收消息，以及卡片发送与更新接口。
 - 表格命令和 JSON 输出契约以当前安装的官方 `lark-cli` 帮助及其配套技能为准。本次在 `lark-cli 1.0.93` 上完成真实字段读取和写入预览。

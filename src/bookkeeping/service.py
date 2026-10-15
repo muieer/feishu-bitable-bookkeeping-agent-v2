@@ -4,16 +4,18 @@ from datetime import date, datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from pydantic_ai import Agent
-from pydantic_ai.usage import UsageLimits
+from langchain_core.messages import AIMessage
+from langgraph.graph.state import CompiledStateGraph
+from langsmith import tracing_context
 
-from .agent import RunDeps, user_prompt
 from .audit import Audit, message_context
 from .cli import Ledger
 from .config import Settings
 from .domain import Decision, TaskReport, locate_source
 from .journal import Journal
 from .knowledge import Knowledge
+from .prompts import user_prompt
+from .tools import RunDeps
 
 
 class Reporter(Protocol):
@@ -33,7 +35,7 @@ class BookkeepingService:
     def __init__(
         self,
         settings: Settings,
-        agent: Agent[RunDeps, Decision],
+        agent: CompiledStateGraph,
         ledger: Ledger,
         knowledge: Knowledge,
         journal: Journal,
@@ -96,20 +98,29 @@ class BookkeepingService:
                     self.knowledge,
                     self.audit,
                     progress,
+                    request_limit=request_limit or self.settings.model_request_limit,
                 )
                 await progress("正在理解消费信息与分类")
                 cancelled = False
                 try:
-                    async with asyncio.timeout(self.settings.task_timeout_seconds):
-                        result = await self.agent.run(
-                            user_prompt(message.text),
-                            deps=deps,
-                            usage_limits=UsageLimits(
-                                request_limit=request_limit or self.settings.model_request_limit,
-                                tool_calls_limit=30,
-                            ),
-                        )
-                    skipped = list(result.output.skipped)
+                    with tracing_context(enabled=False):
+                        async with asyncio.timeout(self.settings.task_timeout_seconds):
+                            result = await self.agent.ainvoke(
+                                {
+                                    "messages": [
+                                        {"role": "user", "content": user_prompt(message.text)}
+                                    ]
+                                },
+                                context=deps,
+                                config={"recursion_limit": 1000},
+                            )
+                    decision = Decision.model_validate(result["structured_response"])
+                    usage = [
+                        item.usage_metadata
+                        for item in result["messages"]
+                        if isinstance(item, AIMessage) and item.usage_metadata
+                    ]
+                    skipped = list(decision.skipped)
                     spans = {
                         locate_source(message.text, item.source_text, item.source_occurrence)
                         for item in skipped
@@ -120,9 +131,9 @@ class BookkeepingService:
                     report = TaskReport(
                         entries=self.journal.entries(message_id),
                         skipped=skipped,
-                        no_consumption=result.output.no_consumption and not skipped,
+                        no_consumption=decision.no_consumption and not skipped,
                     )
-                    self.audit.event("agent_completed", usage=result.usage, decision=result.output)
+                    self.audit.event("agent_completed", usage=usage, decision=decision)
                 except (Exception, asyncio.CancelledError) as error:
                     cancelled = isinstance(error, asyncio.CancelledError)
                     self.audit.event(

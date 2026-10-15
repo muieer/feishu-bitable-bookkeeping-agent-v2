@@ -5,10 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "feishu-bookkeeping-agent"
 version = "0.1.0"
-description = "基于 Pydantic AI 的飞书自主记账智能体"
+description = "基于 LangChain 的飞书自主记账智能体"
 requires-python = ">=3.11"
 dependencies = [
-  "pydantic-ai-slim[openai]==1.107.7",
+  "langchain==1.4.6",
+  "langchain-core==1.6.10",
+  "langchain-openai==1.7.2",
+  "langgraph==1.2.15",
+  "langsmith==0.14.8",
   "lark-channel-sdk==1.4.0",
   "pydantic-settings==2.15.0",
   "httpx==0.28.1",
