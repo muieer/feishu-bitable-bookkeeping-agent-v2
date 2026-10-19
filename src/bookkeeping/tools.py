@@ -9,7 +9,7 @@ from datetime import date
 from .audit import Audit
 from .cli import Ledger
 from .domain import Decision, ExpenseProposal, SkippedExpense, WriteOutcome, locate_source
-from .journal import Journal
+from .journal import Journal, Submission
 from .knowledge import Knowledge
 
 Progress = Callable[[str], Awaitable[None]]
@@ -50,6 +50,39 @@ async def query_history(deps: RunDeps, keyword: str, limit: int = 20) -> dict:
     return result
 
 
+async def _create(deps: RunDeps, submission: Submission) -> WriteOutcome:
+    assert submission.unique_id is not None, "Legacy submissions must only reuse saved results"
+    try:
+        return await deps.ledger.create(submission.expense, submission.unique_id)
+    except Exception as error:
+        deps.audit.event("tool_error", tool="add_expenses", error=repr(error))
+        return WriteOutcome(status="uncertain", reason="写入已发起，但发生异常，请核对账本")
+
+
+async def _submit(deps: RunDeps, span: tuple[int, int]) -> WriteOutcome:
+    # Both attempts use the validated snapshot read back from the committed journal.
+    submission = deps.journal.submission(deps.message_id, span)
+    outcome = await _create(deps, submission)
+    if outcome.status != "uncertain":
+        return outcome
+    deps.journal.complete_write(deps.message_id, span, outcome)
+    await asyncio.sleep(3)
+    checked = await deps.ledger.find_write(submission.expense, submission.unique_id)
+    if checked is None:
+        retried = await _create(deps, submission)
+        outcome = (
+            retried
+            if retried.status == "success"
+            else WriteOutcome(
+                status="uncertain",
+                reason="已补写一次，但仍无法确认最终结果，请核对账本。" + retried.reason,
+            )
+        )
+    else:
+        outcome = checked
+    return outcome
+
+
 async def add_expenses(deps: RunDeps, expenses: list[ExpenseProposal]) -> list[dict]:
     """向唯一指定账本新增一笔或多笔已确认消费；逐笔校验、独立执行并返回真实状态。"""
     if len(expenses) > 100:
@@ -59,7 +92,13 @@ async def add_expenses(deps: RunDeps, expenses: list[ExpenseProposal]) -> list[d
     for proposal in expenses:
         deps.audit.event("tool_start", tool="add_expenses", proposal=proposal)
         try:
-            expense, span = deps.knowledge.validate(proposal, deps.message_text, deps.today)
+            span = locate_source(
+                deps.message_text, proposal.source_text, proposal.source_occurrence
+            )
+            cached = deps.journal.existing_write(deps.message_id, span)
+            if cached is None:
+                expense, span = deps.knowledge.validate(proposal, deps.message_text, deps.today)
+                cached = deps.journal.reserve(deps.message_id, span, expense)
         except ValueError as error:
             # Do not feed raw pydantic errors (including input credentials) back to the LLM.
             from pydantic import ValidationError
@@ -87,7 +126,6 @@ async def add_expenses(deps: RunDeps, expenses: list[ExpenseProposal]) -> list[d
             except ValueError:
                 pass
         else:
-            cached = deps.journal.reserve(deps.message_id, span, expense)
             if cached:
                 result = {
                     **cached.outcome.model_dump(),
@@ -98,7 +136,7 @@ async def add_expenses(deps: RunDeps, expenses: list[ExpenseProposal]) -> list[d
             else:
                 deps.rejected.pop(span, None)
                 try:
-                    outcome = await deps.ledger.create(expense)
+                    outcome = await _submit(deps, span)
                 except asyncio.CancelledError:
                     deps.journal.complete_write(
                         deps.message_id,

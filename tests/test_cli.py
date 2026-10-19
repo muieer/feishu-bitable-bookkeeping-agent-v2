@@ -59,13 +59,14 @@ async def test_success_is_one_create_and_no_readback(settings, audit, monkeypatc
         return ProcessResult(0, '{"ok":true,"data":{"record_id_list":["recConfirmed"]}}')
 
     monkeypatch.setattr(ledger, "_run", fake_run)
-    result = await ledger.create(coffee())
+    result = await ledger.create(coffee(), "test-generated-id")
     assert result.status == "success"
     assert len(calls) == 1
     action, args = calls[0]
     assert action == "create" and args[:2] == ["base", "+record-batch-create"]
     payload = json.loads(args[args.index("--json") + 1])["create_records"][0]
-    assert set(payload) == {"记账日期", "一级分类", "二级分类", "具体", "金额"}
+    assert set(payload) == {"记账日期", "一级分类", "二级分类", "具体", "金额", "unique_id"}
+    assert payload["unique_id"] == "test-generated-id"
     assert payload["记账日期"] == "2026-10-14T00:00:00+08:00"
     assert payload["一级分类"] == ["饮食"] and payload["金额"] == 18
 

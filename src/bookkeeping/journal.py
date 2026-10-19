@@ -2,6 +2,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 from .domain import EntryResult, Expense, TaskReport, WriteOutcome
 
@@ -16,8 +17,14 @@ class Message:
     card_id: str | None
 
 
+@dataclass(frozen=True)
+class Submission:
+    expense: Expense
+    unique_id: str | None
+
+
 class Journal:
-    """Durable submission reservations; a submitted row is never automatically resubmitted."""
+    """Durable reservations; only the owning tool call may reconcile a new submission."""
 
     def __init__(self, path: Path, namespace: str):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -38,6 +45,7 @@ class Journal:
                 message_id TEXT NOT NULL, source_start INTEGER NOT NULL,
                 source_end INTEGER NOT NULL,
                 expense TEXT NOT NULL, state TEXT NOT NULL, record_id TEXT, reason TEXT NOT NULL,
+                unique_id TEXT,
                 PRIMARY KEY (message_id, source_start, source_end),
                 FOREIGN KEY (message_id) REFERENCES messages(message_id)
             );
@@ -52,6 +60,10 @@ class Journal:
             self.connection.execute(
                 "INSERT OR IGNORE INTO metadata VALUES ('namespace', ?)", (namespace,)
             )
+            columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(writes)")}
+            if "unique_id" not in columns:
+                # NULL identifies legacy writes; never invent IDs or replay those submissions.
+                self.connection.execute("ALTER TABLE writes ADD COLUMN unique_id TEXT")
 
     def accept(self, message_id: str, chat_id: str, text: str, today: date) -> bool:
         if not message_id or not chat_id:
@@ -100,10 +112,35 @@ class Journal:
             if old:
                 return self._entry(old)
             self.connection.execute(
-                "INSERT INTO writes VALUES (?, ?, ?, ?, 'submitted', NULL, ?)",
-                (message_id, *span, expense.model_dump_json(), "写入已开始，结果尚未确认"),
+                "INSERT INTO writes "
+                "(message_id, source_start, source_end, expense, state, reason, unique_id) "
+                "VALUES (?, ?, ?, ?, 'submitted', ?, ?)",
+                (
+                    message_id,
+                    *span,
+                    expense.model_dump_json(),
+                    "写入已开始，结果尚未确认",
+                    str(uuid4()),
+                ),
             )
         return None
+
+    def existing_write(self, message_id: str, span: tuple[int, int]) -> EntryResult | None:
+        row = self.connection.execute(
+            "SELECT * FROM writes WHERE message_id=? AND source_start < ? AND source_end > ?",
+            (message_id, span[1], span[0]),
+        ).fetchone()
+        return self._entry(row) if row else None
+
+    def submission(self, message_id: str, span: tuple[int, int]) -> Submission:
+        row = self.connection.execute(
+            "SELECT expense, unique_id FROM writes "
+            "WHERE message_id=? AND source_start=? AND source_end=?",
+            (message_id, *span),
+        ).fetchone()
+        if row is None:
+            raise KeyError((message_id, span))
+        return Submission(Expense.model_validate_json(row["expense"]), row["unique_id"])
 
     def complete_write(self, message_id: str, span: tuple[int, int], outcome: WriteOutcome) -> None:
         with self.connection:

@@ -33,3 +33,5 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .DS_Store
+
+/docs/verification/

@@ -175,7 +175,7 @@ async def test_cancellation_after_submission_is_persisted_as_uncertain(
     started = asyncio.Event()
 
     class HangingLedger(MemoryLedger):
-        async def create(self, expense):
+        async def create(self, expense, unique_id):
             self.created.append(expense)
             started.set()
             await asyncio.Event().wait()

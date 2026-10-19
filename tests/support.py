@@ -43,7 +43,7 @@ class MemoryLedger:
             "has_more": False,
         }
 
-    async def create(self, expense: Expense) -> WriteOutcome:
+    async def create(self, expense: Expense, unique_id: str) -> WriteOutcome:
         self.created.append(expense)
         state = next(
             (status for word, status in self.outcomes.items() if word in expense.description),
@@ -57,6 +57,9 @@ class MemoryLedger:
             "测试工具明确拒绝该笔写入" if state == "failed" else "测试工具提交后超时，请核对账本"
         )
         return WriteOutcome(status=state, reason=reason)
+
+    async def find_write(self, expense: Expense, unique_id: str) -> WriteOutcome | None:
+        return WriteOutcome(status="uncertain", reason="离线模拟核对不可用")
 
 
 class ScriptedChatModel(BaseChatModel):

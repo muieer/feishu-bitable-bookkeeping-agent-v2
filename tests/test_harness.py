@@ -183,11 +183,11 @@ async def test_business_tools_remain_serial_even_when_model_emits_parallel_calls
     class SerialLedger(MemoryLedger):
         active = False
 
-        async def create(self, expense):
+        async def create(self, expense, unique_id):
             assert not self.active, "Ledger writes must never overlap"
             self.active = True
             await asyncio.sleep(0)
-            result = await super().create(expense)
+            result = await super().create(expense, unique_id)
             self.active = False
             return result
 

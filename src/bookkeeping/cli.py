@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import time as day_time
+from decimal import Decimal
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -17,7 +18,8 @@ from .domain import Expense, WriteOutcome
 
 class Ledger(Protocol):
     async def query_history(self, keyword: str, limit: int) -> dict[str, Any]: ...
-    async def create(self, expense: Expense) -> WriteOutcome: ...
+    async def create(self, expense: Expense, unique_id: str) -> WriteOutcome: ...
+    async def find_write(self, expense: Expense, unique_id: str) -> WriteOutcome | None: ...
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ class LarkCliLedger:
             self.settings.lark_cli_identity,
         ]
 
-    def fields(self, expense: Expense) -> dict[str, Any]:
+    def fields(self, expense: Expense, unique_id: str | None = None) -> dict[str, Any]:
         midnight = datetime.combine(
             expense.expense_date, day_time(), ZoneInfo(self.settings.timezone)
         )
@@ -110,6 +112,8 @@ class LarkCliLedger:
         }
         if expense.category_l3 is not None:
             fields["三级分类"] = [expense.category_l3]
+        if unique_id is not None:
+            fields["unique_id"] = unique_id
         return fields
 
     async def _run(self, action: str, args: list[str]) -> ProcessResult:
@@ -161,9 +165,11 @@ class LarkCliLedger:
         )
         return result
 
-    async def create(self, expense: Expense) -> WriteOutcome:
+    async def create(self, expense: Expense, unique_id: str) -> WriteOutcome:
         payload = json.dumps(
-            {"create_records": [self.fields(expense)]}, ensure_ascii=False, allow_nan=False
+            {"create_records": [self.fields(expense, unique_id)]},
+            ensure_ascii=False,
+            allow_nan=False,
         )
         result = await self._run(
             "create",
@@ -178,6 +184,79 @@ class LarkCliLedger:
             ],
         )
         return classify_write(result)
+
+    async def find_write(self, expense: Expense, unique_id: str) -> WriteOutcome | None:
+        """One exact, complete read. None means confirmed absent; unsafe reads stay uncertain."""
+        uncertain = WriteOutcome(status="uncertain", reason="写入核对未能确认结果，请检查账本")
+        args = ["base", "+record-list", *self._target(), "--format", "json", "--limit", "2"]
+        for name in (*self.settings.writable_fields, "unique_id"):
+            args += ["--field-id", name]
+        args += [
+            "--filter-json",
+            json.dumps({"logic": "and", "conditions": [["unique_id", "==", unique_id]]}),
+        ]
+        result = await self._run("reconcile", args)
+        envelope = parse_json(result.stdout)
+        if (
+            not result.launched
+            or result.timeout
+            or result.code != 0
+            or not envelope
+            or envelope.get("ok") is not True
+        ):
+            return uncertain
+        data = envelope.get("data")
+        if not isinstance(data, dict) or data.get("has_more") is not False:
+            return uncertain
+        fields, rows, ids = data.get("fields"), data.get("data"), data.get("record_id_list")
+        if (
+            not isinstance(fields, list)
+            or not all(isinstance(name, str) for name in fields)
+            or len(set(fields)) != len(fields)
+            or not set((*self.settings.writable_fields, "unique_id")).issubset(fields)
+            or not isinstance(rows, list)
+            or not isinstance(ids, list)
+            or len(ids) != len(rows)
+        ):
+            return uncertain
+        if not rows:
+            return None
+        if (
+            len(rows) != 1
+            or not isinstance(rows[0], list)
+            or len(rows[0]) != len(fields)
+            or not isinstance(ids[0], str)
+            or not re.fullmatch(r"rec[A-Za-z0-9]+", ids[0])
+        ):
+            return uncertain
+        actual = dict(zip(fields, rows[0], strict=True))
+        if not self._matches(actual, expense, unique_id):
+            return WriteOutcome(status="uncertain", reason="写入核对发现业务内容冲突，请检查账本")
+        return WriteOutcome(status="success", record_id=ids[0])
+
+    def _matches(self, actual: dict[str, Any], expense: Expense, unique_id: str) -> bool:
+        expected = self.fields(expense, unique_id)
+        for name in ("unique_id", self.settings.bitable_description_field, "一级分类", "二级分类"):
+            if actual[name] != expected[name]:
+                return False
+        if expense.category_l3 is None:
+            if actual["三级分类"] not in (None, []):
+                return False
+        elif actual["三级分类"] != expected["三级分类"]:
+            return False
+        amount = actual[self.settings.bitable_amount_field]
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            return False
+        if Decimal(str(amount)) != expense.amount:
+            return False
+        try:
+            when = datetime.fromisoformat(actual[self.settings.bitable_date_field])
+            return (
+                when.tzinfo is not None
+                and when.astimezone(ZoneInfo(self.settings.timezone)).date() == expense.expense_date
+            )
+        except (ValueError, TypeError):
+            return False
 
     async def query_history(self, keyword: str, limit: int = 20) -> dict[str, Any]:
         if not 1 <= limit <= 50 or len(keyword) > 100:
@@ -237,6 +316,7 @@ class LarkCliLedger:
                 strict=True,
             )
         )
+        required["unique_id"] = "text"
         for name, kind in required.items():
             if name not in actual or actual[name].get("type") != kind:
                 raise ValueError(f"账本字段 {name} 缺失或类型不是 {kind}，已停止启动")
